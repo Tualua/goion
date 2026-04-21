@@ -2,8 +2,9 @@ package main
 
 import (
 	"fmt"
-	"github.com/Tualua/goion"
 	"log"
+
+	"github.com/Tualua/goion"
 )
 
 func ExampleBasicAlloc() {
@@ -81,7 +82,7 @@ func ExamplePoolInfo() {
 // ExampleIommu demonstrates opening with IOMMU / cedar support (kernel 5.4+).
 func ExampleIommu() {
 	log.Println("IOMMU")
-	alloc, err := goion.OpenWithCedar()
+	alloc, err := goion.Open()
 	if err != nil {
 		log.Fatal(err)
 	}

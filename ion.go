@@ -248,16 +248,25 @@ func (a *Allocator) Free(virtAddr uintptr) error {
 	}
 
 	if a.hasIommu {
-		_ = ioctl(a.cedarFd, awMemEngineREL, 0)
+		err := ioctl(a.cedarFd, awMemEngineREL, 0)
+		if err != nil {
+			return fmt.Errorf("ion: ENGINE_REL: %w", err)
+		}
 		ip := userIommuParam{Fd: node.fdData.Fd}
-		_ = ioctl(a.cedarFd, awMemFreeIommuAddr, uintptr(unsafe.Pointer(&ip)))
+		err = ioctl(a.cedarFd, awMemFreeIommuAddr, uintptr(unsafe.Pointer(&ip)))
+		if err != nil {
+			return fmt.Errorf("ion: FREE_IOMMU_ADDR: %w", err)
+		}
 	}
 
 	syscall.Close(int(node.fdData.Fd))
 
 	if !a.isModern && node.fdData.Handle != 0 {
 		hd := ionHandleData{Handle: node.fdData.Handle}
-		_ = ioctl(a.fd, awMemIonIOCFree, uintptr(unsafe.Pointer(&hd)))
+		err := ioctl(a.fd, awMemIonIOCFree, uintptr(unsafe.Pointer(&hd)))
+		if err != nil {
+			return fmt.Errorf("ion: ION_IOC_FREE: %w", err)
+		}
 	}
 
 	a.buffers = append(a.buffers[:idx], a.buffers[idx+1:]...)
