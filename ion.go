@@ -102,7 +102,10 @@ func (a *Allocator) Close() {
 	}
 
 	for _, b := range a.buffers {
-		_ = munmapBuffer(b)
+		err := munmapBuffer(b)
+		if err != nil {
+			fmt.Printf("ion: munmap during Close: %v\n", err)
+		}
 		syscall.Close(int(b.fdData.Fd))
 	}
 	a.buffers = nil
@@ -180,7 +183,10 @@ func (a *Allocator) Alloc(size int, cached bool) (*AllocResult, error) {
 
 	addrPhy, err := a.getPhysAddr(handle, int32(size), dmaBufFd)
 	if err != nil {
-		_, _, _ = syscall.Syscall(syscall.SYS_MUNMAP, addrVir, uintptr(size), 0)
+		_, _, errno := syscall.Syscall(syscall.SYS_MUNMAP, addrVir, uintptr(size), 0)
+		if errno != 0 {
+			fmt.Printf("ion: munmap during Alloc: %v\n", errno)
+		}
 		syscall.Close(int(dmaBufFd))
 		return nil, err
 	}
@@ -217,7 +223,10 @@ func (a *Allocator) AllocSecure(size int) (*AllocResult, error) {
 	phys := sunxiPhysData{Handle: handle, Size: uint32(size)}
 	custom := ionCustomData{Cmd: ionIOCSunxiPhysAddr, Arg: uintptr(unsafe.Pointer(&phys))}
 	if err := ioctl(a.fd, awMemIonIOCCustom, uintptr(unsafe.Pointer(&custom))); err != nil {
-		_, _, _ = syscall.Syscall(syscall.SYS_MUNMAP, addrVir, uintptr(size), 0)
+		_, _, errno := syscall.Syscall(syscall.SYS_MUNMAP, addrVir, uintptr(size), 0)
+		if errno != 0 {
+			fmt.Printf("ion: munmap during AllocSecure: %v\n", errno)
+		}
 		return nil, fmt.Errorf("ion: AllocSecure PHYS_ADDR: %w", err)
 	}
 
