@@ -4,8 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 // ---------------------------------------------------------------------------
@@ -106,13 +107,13 @@ func (a *Allocator) Close() {
 		if err != nil {
 			fmt.Printf("ion: munmap during Close: %v\n", err)
 		}
-		syscall.Close(int(b.fdData.Fd))
+		unix.Close(int(b.fdData.Fd))
 	}
 	a.buffers = nil
-	syscall.Close(a.fd)
+	unix.Close(a.fd)
 	a.fd = -1
 	if a.cedarFd != -1 {
-		syscall.Close(a.cedarFd)
+		unix.Close(a.cedarFd)
 		a.cedarFd = -1
 	}
 	globalCtx = nil
@@ -177,17 +178,16 @@ func (a *Allocator) Alloc(size int, cached bool) (*AllocResult, error) {
 
 	addrVir, err := mmapFd(dmaBufFd, size)
 	if err != nil {
-		syscall.Close(int(dmaBufFd))
+		unix.Close(int(dmaBufFd))
 		return nil, err
 	}
 
 	addrPhy, err := a.getPhysAddr(handle, int32(size), dmaBufFd)
 	if err != nil {
-		_, _, errno := syscall.Syscall(syscall.SYS_MUNMAP, addrVir, uintptr(size), 0)
-		if errno != 0 {
-			fmt.Printf("ion: munmap during Alloc: %v\n", errno)
+		if err := munmapBytes(addrVir, size); err != nil {
+			fmt.Printf("ion: munmap during Alloc: %v\n", err)
 		}
-		syscall.Close(int(dmaBufFd))
+		unix.Close(int(dmaBufFd))
 		return nil, err
 	}
 
@@ -216,16 +216,15 @@ func (a *Allocator) AllocSecure(size int) (*AllocResult, error) {
 
 	addrVir, err := mmapFd(dmaBufFd, size)
 	if err != nil {
-		syscall.Close(int(dmaBufFd))
+		unix.Close(int(dmaBufFd))
 		return nil, err
 	}
 
 	phys := sunxiPhysData{Handle: handle, Size: uint32(size)}
 	custom := ionCustomData{Cmd: ionIOCSunxiPhysAddr, Arg: uintptr(unsafe.Pointer(&phys))}
 	if err := ioctl(a.fd, awMemIonIOCCustom, uintptr(unsafe.Pointer(&custom))); err != nil {
-		_, _, errno := syscall.Syscall(syscall.SYS_MUNMAP, addrVir, uintptr(size), 0)
-		if errno != 0 {
-			fmt.Printf("ion: munmap during AllocSecure: %v\n", errno)
+		if err := munmapBytes(addrVir, size); err != nil {
+			fmt.Printf("ion: munmap during AllocSecure: %v\n", err)
 		}
 		return nil, fmt.Errorf("ion: AllocSecure PHYS_ADDR: %w", err)
 	}
@@ -268,7 +267,7 @@ func (a *Allocator) Free(virtAddr uintptr) error {
 		}
 	}
 
-	syscall.Close(int(node.fdData.Fd))
+	unix.Close(int(node.fdData.Fd))
 
 	if !a.isModern && node.fdData.Handle != 0 {
 		hd := ionHandleData{Handle: node.fdData.Handle}
@@ -388,7 +387,7 @@ func GetPoolInfo() (*PoolInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ion: GetPoolInfo open: %w", err)
 	}
-	defer syscall.Close(fd)
+	defer unix.Close(fd)
 
 	var info sunxiPoolInfo
 	custom := ionCustomData{
@@ -424,15 +423,15 @@ func poolInfoFromProcMeminfo() (*PoolInfo, error) {
 
 // readSmallFile reads an entire small file using only syscalls.
 func readSmallFile(path string) ([]byte, error) {
-	fd, err := syscall.Open(path, syscall.O_RDONLY, 0)
+	fd, err := unix.Open(path, unix.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}
-	defer syscall.Close(fd)
+	defer unix.Close(fd)
 	var buf [8192]byte
 	var out []byte
 	for {
-		n, err := syscall.Read(fd, buf[:])
+		n, err := unix.Read(fd, buf[:])
 		if n > 0 {
 			out = append(out, buf[:n]...)
 		}
@@ -580,36 +579,40 @@ func (a *Allocator) findByVirt(virt uintptr) (int, *bufferNode) {
 }
 
 func munmapBuffer(b *bufferNode) error {
-	_, _, errno := syscall.Syscall(syscall.SYS_MUNMAP, b.userVirt, uintptr(b.size), 0)
-	if errno != 0 {
-		return fmt.Errorf("ion: munmap: %w", errno)
+	if err := munmapBytes(b.userVirt, int(b.size)); err != nil {
+		return fmt.Errorf("ion: munmap: %w", err)
 	}
 	return nil
 }
 
 func mmapFd(fd int32, size int) (uintptr, error) {
-	addr, _, errno := syscall.Syscall6(
-		syscall.SYS_MMAP, 0, uintptr(size),
-		syscall.PROT_READ|syscall.PROT_WRITE,
-		syscall.MAP_SHARED, uintptr(fd), 0,
-	)
-	if errno != 0 {
-		return 0, fmt.Errorf("ion: mmap: %w", errno)
+	b, err := unix.Mmap(int(fd), 0, size,
+		unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		return 0, fmt.Errorf("ion: mmap: %w", err)
 	}
-	return addr, nil
+	return uintptr(unsafe.Pointer(&b[0])), nil
 }
 
 // openRaw opens path with O_RDONLY and returns a raw fd that the Go runtime
 // will NOT close automatically (unlike os.File).
 func openRaw(path string) (int, error) {
-	return syscall.Open(path, syscall.O_RDONLY, 0)
+	return unix.Open(path, unix.O_RDONLY, 0)
 }
 
 // ioctl wraps SYS_IOCTL.
 func ioctl(fd int, req uintptr, arg uintptr) error {
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), req, arg)
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), req, arg)
 	if errno != 0 {
 		return errno
 	}
 	return nil
+}
+
+// munmapBytes unmaps `size` bytes starting at virtual address `addr`.
+// Uses unix.Munmap which correctly selects mmap/mmap2 syscall per arch.
+func munmapBytes(addr uintptr, size int) error {
+	// Reconstruct the []byte slice header so we can pass it to unix.Munmap.
+	b := unsafe.Slice((*byte)(unsafe.Pointer(addr)), size)
+	return unix.Munmap(b)
 }
